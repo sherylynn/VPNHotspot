@@ -164,6 +164,9 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keep DNS servers alive while tethering services are active" />
         </service>
+        <service
+            android:name=".webserver.WebService"
+            android:exported="false" />
 
         <service
             android:name=".manage.RepeaterTileService"

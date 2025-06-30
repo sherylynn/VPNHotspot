@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.view.LayoutInflater
+import android.view.Menu // Added import for Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
@@ -36,6 +37,7 @@ import be.mygod.vpnhotspot.net.wifi.WifiApManager
 import be.mygod.vpnhotspot.root.RootManager
 import be.mygod.vpnhotspot.root.WifiApCommands
 import be.mygod.vpnhotspot.util.*
+import be.mygod.vpnhotspot.webserver.WebService
 import be.mygod.vpnhotspot.widget.SmartSnackbar
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.CancellationException
@@ -149,6 +151,7 @@ class TetheringFragment : Fragment(), ServiceConnection, Toolbar.OnMenuItemClick
     private lateinit var binding: FragmentTetheringBinding
     var binder: TetheringService.Binder? = null
     private val adapter = ManagerAdapter()
+    private var isWebServiceRunning = false // Flag to track WebService state
     private val receiver = broadcastReceiver { _, intent ->
         adapter.activeIfaces = intent.tetheredIfaces ?: return@broadcastReceiver
         adapter.localOnlyIfaces = intent.localOnlyTetheredIfaces ?: return@broadcastReceiver
@@ -232,8 +235,26 @@ class TetheringFragment : Fragment(), ServiceConnection, Toolbar.OnMenuItemClick
                 }
                 true
             }
+            R.id.web_service -> {
+                if (isWebServiceRunning) {
+                    activity?.stopService(Intent(activity, WebService::class.java))
+                    SmartSnackbar.make("Web service stopped").show()
+                } else {
+                    activity?.startService(Intent(activity, WebService::class.java))
+                    SmartSnackbar.make("Web service started on port 9999").show()
+                }
+                isWebServiceRunning = !isWebServiceRunning
+                // Update menu item title if needed, e.g., item.title = if (isWebServiceRunning) "Stop Web Service" else "Start Web Service"
+                activity?.invalidateOptionsMenu() // To refresh the menu item, if you change its title or icon
+                true
+            }
             else -> false
         }
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu) {
+        super.onPrepareOptionsMenu(menu)
+        menu.findItem(R.id.web_service)?.title = if (isWebServiceRunning) "Stop Web Service" else "Start Web Service"
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {

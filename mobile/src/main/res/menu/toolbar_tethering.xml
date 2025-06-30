@@ -23,4 +23,8 @@
                   android:title="@string/tethering_manage_wifi"/>
         </menu>
     </item>
+
+    <item android:id="@+id/web_service"
+          android:title="Web Service"
+          app:showAsAction="ifRoom" />
 </menu>
