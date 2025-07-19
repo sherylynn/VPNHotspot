@@ -106,6 +106,12 @@
             app:title="自动启动USB网络共享"
             app:summary="应用启动后自动开启USB网络共享并每秒检查确保其运行"/>
         <SwitchPreferenceCompat
+            app:key="remote.control.auto.connect"
+            app:icon="@drawable/ic_action_settings_backup_restore"
+            app:title="远程控制自动连接"
+            app:summary="进入远程控制页面时自动尝试连接上次保存的远程设备"
+            app:defaultValue="true"/>
+        <SwitchPreferenceCompat
             app:key="service.repeater.safeMode"
             app:icon="@drawable/ic_alert_warning"
             app:title="@string/settings_service_repeater_safe_mode"

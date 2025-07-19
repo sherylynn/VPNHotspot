@@ -28,6 +28,7 @@ import be.mygod.vpnhotspot.util.QRCodeGenerator
 import be.mygod.vpnhotspot.StaticIpSetter
 import be.mygod.vpnhotspot.util.launchUrl
 import be.mygod.vpnhotspot.util.showAllowingStateLoss
+import android.content.Context
 import be.mygod.vpnhotspot.widget.SmartSnackbar
 import com.google.android.gms.oss.licenses.OssLicensesMenuActivity
 import android.view.LayoutInflater
@@ -150,6 +151,12 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         findPreference<Preference>("misc.licenses")!!.setOnPreferenceClickListener {
             startActivity(Intent(context, OssLicensesMenuActivity::class.java))
             true
+        }
+        
+        // 远程控制自动连接开关
+        findPreference<TwoStatePreference>("remote.control.auto.connect")!!.setOnPreferenceChangeListener { _, newValue ->
+            // 更新设置偏好
+            true  // 使用默认的SharedPreferences存储
         }
         
         // Web服务器设置

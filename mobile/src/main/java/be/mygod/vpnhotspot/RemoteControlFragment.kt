@@ -68,20 +68,25 @@ class RemoteControlFragment : Fragment() {
         // 检查是否已经手动修改过
         val manualModified = prefs.getBoolean(KEY_MANUAL_MODIFIED, false)
         
+        // 从设置页面读取全局自动连接开关
+        val settingsPrefs = requireContext().getSharedPreferences("settings_prefs", Context.MODE_PRIVATE)
+        val globalAutoConnect = settingsPrefs.getBoolean("remote.control.auto.connect", true)
+        
         if (manualModified) {
             // 如果已经手动修改过，加载保存的连接信息
             val lastIp = prefs.getString(KEY_LAST_IP, null)
             val lastPort = prefs.getInt(KEY_LAST_PORT, 9999)
             val lastApiKey = prefs.getString(KEY_LAST_API_KEY, null)
-            val autoConnect = prefs.getBoolean(KEY_AUTO_CONNECT, false)
+            val localAutoConnect = prefs.getBoolean(KEY_AUTO_CONNECT, true)
             
             if (lastIp != null && lastApiKey != null) {
                 binding.ipInput.setText(lastIp)
                 binding.portInput.setText(lastPort.toString())
                 binding.passwordInput.setText(lastApiKey)
                 
-                // 如果设置了自动连接，则自动连接
-                if (autoConnect) {
+                // 使用全局设置和本地设置的逻辑与
+                val shouldAutoConnect = globalAutoConnect && localAutoConnect
+                if (shouldAutoConnect) {
                     connectToRemoteDevice()
                 }
             } else {
@@ -91,6 +96,20 @@ class RemoteControlFragment : Fragment() {
         } else {
             // 如果没有手动修改过，使用默认的本地地址
             loadDefaultLocalAddress()
+            
+            // 如果全局设置允许自动连接且使用默认本地地址，也尝试连接
+            if (globalAutoConnect) {
+                val localIp = getDeviceIpAddress()
+                val localPort = WebServerManager.getPort()
+                val localApiKey = ApiKeyManager.getApiKey()
+                
+                if (localIp != null && !localApiKey.isNullOrEmpty()) {
+                    // 延迟一下，让UI先显示出来
+                    view.postDelayed({
+                        connectToRemoteDevice()
+                    }, 500)
+                }
+            }
         }
     }
     
