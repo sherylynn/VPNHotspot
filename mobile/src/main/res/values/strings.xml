@@ -182,6 +182,8 @@
     <string name="settings_restart_required">Restart this app to apply this setting.</string>
     <string name="settings_exit_app">Exit</string>
 
+    <!-- WebServer -->
+    <string name="webserver_start_failed">Failed to start WebServer on port %d</string>
 
     
     <!-- 远程控制 -->

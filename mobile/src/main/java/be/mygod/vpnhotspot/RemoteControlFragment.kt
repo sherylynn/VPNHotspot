@@ -25,7 +25,7 @@ import java.net.URLEncoder
 
 class RemoteControlFragment : Fragment() {
     private var _binding: FragmentRemoteControlBinding? = null
-    private val binding get() = _binding!!
+    private val binding get() = _binding ?: throw IllegalStateException("Fragment binding is null")
     
     private lateinit var prefs: SharedPreferences
     
@@ -105,7 +105,7 @@ class RemoteControlFragment : Fragment() {
                 
                 if (localIp != null && !localApiKey.isNullOrEmpty()) {
                     // 延迟一下，让UI先显示出来
-                    view.postDelayed({
+                    view?.postDelayed({
                         connectToRemoteDevice()
                     }, 500)
                 }
@@ -279,13 +279,18 @@ class RemoteControlFragment : Fragment() {
                     fetchRemoteDeviceInfo(ip, port, apiKey)
                 }
 
+                // 检查Fragment是否仍然活跃
+                if (!isAdded || _binding == null) {
+                    return@launch
+                }
+
                 if (result.success && result.data != null) {
                     displayRemoteStatus(result.data)
-                    binding.remoteStatusCard.visibility = View.VISIBLE
+                    _binding?.remoteStatusCard?.visibility = View.VISIBLE
                     // 保存连接信息
-                    binding.ipInput.tag = ip
-                    binding.portInput.tag = port
-                    binding.passwordInput.tag = apiKey
+                    _binding?.ipInput?.tag = ip
+                    _binding?.portInput?.tag = port
+                    _binding?.passwordInput?.tag = apiKey
                     // 保存到SharedPreferences
                     saveConnectionInfo(ip, port, apiKey)
                     Toast.makeText(context, "连接成功", Toast.LENGTH_SHORT).show()
@@ -295,8 +300,11 @@ class RemoteControlFragment : Fragment() {
             } catch (e: Exception) {
                 Toast.makeText(context, "连接失败: ${e.message}", Toast.LENGTH_SHORT).show()
             } finally {
-                binding.progressBar.visibility = View.GONE
-                binding.connectButton.isEnabled = true
+                // 安全地访问binding
+                _binding?.let { binding ->
+                    binding.progressBar.visibility = View.GONE
+                    binding.connectButton.isEnabled = true
+                }
             }
         }
     }
@@ -311,12 +319,17 @@ class RemoteControlFragment : Fragment() {
             return
         }
 
-        binding.progressBar.visibility = View.VISIBLE
+        _binding?.progressBar?.visibility = View.VISIBLE
 
         lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     fetchRemoteDeviceInfo(ip, port, apiKey)
+                }
+
+                // 检查Fragment是否仍然活跃
+                if (!isAdded || _binding == null) {
+                    return@launch
                 }
 
                 if (result.success && result.data != null) {
@@ -328,27 +341,33 @@ class RemoteControlFragment : Fragment() {
             } catch (e: Exception) {
                 Toast.makeText(context, "刷新失败: ${e.message}", Toast.LENGTH_SHORT).show()
             } finally {
-                binding.progressBar.visibility = View.GONE
+                _binding?.progressBar?.visibility = View.GONE
             }
         }
     }
 
     private fun remoteStartWifi() {
-        val ip = binding.ipInput.tag as? String
-        val port = binding.portInput.tag as? Int ?: 9999
-        val apiKey = binding.passwordInput.tag as? String
+        val currentBinding = _binding ?: return
+        val ip = currentBinding.ipInput.tag as? String
+        val port = currentBinding.portInput.tag as? Int ?: 9999
+        val apiKey = currentBinding.passwordInput.tag as? String
 
         if (ip == null || apiKey == null) {
             Toast.makeText(context, "请先连接远程设备", Toast.LENGTH_SHORT).show()
             return
         }
 
-        binding.progressBar.visibility = View.VISIBLE
+        currentBinding.progressBar.visibility = View.VISIBLE
 
         lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     remoteWifiControl(ip, port, apiKey, true)
+                }
+
+                // 检查Fragment是否仍然活跃
+                if (!isAdded || _binding == null) {
+                    return@launch
                 }
 
                 if (result.success) {
@@ -360,27 +379,33 @@ class RemoteControlFragment : Fragment() {
             } catch (e: Exception) {
                 Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
             } finally {
-                binding.progressBar.visibility = View.GONE
+                _binding?.progressBar?.visibility = View.GONE
             }
         }
     }
 
     private fun remoteStopWifi() {
-        val ip = binding.ipInput.tag as? String
-        val port = binding.portInput.tag as? Int ?: 9999
-        val apiKey = binding.passwordInput.tag as? String
+        val currentBinding = _binding ?: return
+        val ip = currentBinding.ipInput.tag as? String
+        val port = currentBinding.portInput.tag as? Int ?: 9999
+        val apiKey = currentBinding.passwordInput.tag as? String
 
         if (ip == null || apiKey == null) {
             Toast.makeText(context, "请先连接远程设备", Toast.LENGTH_SHORT).show()
             return
         }
 
-        binding.progressBar.visibility = View.VISIBLE
+        currentBinding.progressBar.visibility = View.VISIBLE
 
         lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     remoteWifiControl(ip, port, apiKey, false)
+                }
+
+                // 检查Fragment是否仍然活跃
+                if (!isAdded || _binding == null) {
+                    return@launch
                 }
 
                 if (result.success) {
@@ -392,23 +417,25 @@ class RemoteControlFragment : Fragment() {
             } catch (e: Exception) {
                 Toast.makeText(context, "停止失败: ${e.message}", Toast.LENGTH_SHORT).show()
             } finally {
-                binding.progressBar.visibility = View.GONE
+                _binding?.progressBar?.visibility = View.GONE
             }
         }
     }
 
     private fun displayRemoteStatus(data: JSONObject) {
-        binding.deviceName.text = data.optString("device", "未知设备")
-        binding.batteryLevel.text = "${data.optInt("battery", 0)}%"
+        val currentBinding = _binding ?: return
+        
+        currentBinding.deviceName.text = data.optString("device", "未知设备")
+        currentBinding.batteryLevel.text = "${data.optInt("battery", 0)}%"
         
         // 优先显示电池温度，如果没有则显示旧的temperature字段
         val batteryTemp = data.optDouble("batteryTemperature", -1.0)
         val oldTemp = data.optDouble("temperature", -1.0)
         val displayTemp = if (batteryTemp != -1.0) batteryTemp else oldTemp
-        binding.temperature.text = if (displayTemp != -1.0) "${displayTemp}°C" else "无法获取"
+        currentBinding.temperature.text = if (displayTemp != -1.0) "${displayTemp}°C" else "无法获取"
         
-        binding.cpuUsage.text = "${data.optDouble("cpu", 0.0)}%"
-        binding.wifiStatus.text = data.optString("wifiStatus", "未知")
+        currentBinding.cpuUsage.text = "${data.optDouble("cpu", 0.0)}%"
+        currentBinding.wifiStatus.text = data.optString("wifiStatus", "未知")
         
         println("RemoteControl: 显示状态 - 设备: ${binding.deviceName.text}, 电量: ${binding.batteryLevel.text}, 温度: ${binding.temperature.text}, CPU: ${binding.cpuUsage.text}, WiFi: ${binding.wifiStatus.text}")
     }

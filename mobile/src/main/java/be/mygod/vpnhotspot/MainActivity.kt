@@ -84,8 +84,15 @@ class MainActivity : AppCompatActivity(), NavigationBarView.OnItemSelectedListen
         WebServerManager.init(this)
         
         // 启动WebServer（默认启动，API Key保护是可选的）
-        WebServerManager.start(this)
-        Timber.i("WebServer started on port ${WebServerManager.getPort()}")
+        try {
+            WebServerManager.start(this)
+            Timber.i("WebServer successfully started on port ${WebServerManager.getPort()}")
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to start WebServer on port ${WebServerManager.getPort()}")
+            // 显示错误提示给用户
+            SmartSnackbar.make(getString(R.string.webserver_start_failed, WebServerManager.getPort()))
+                .show()
+        }
         
         lastUpdate = UpdateChecker.check()
         val updateItem = binding.navigation.menu.findItem(R.id.navigation_update)
@@ -103,6 +110,24 @@ class MainActivity : AppCompatActivity(), NavigationBarView.OnItemSelectedListen
             isVisible = true
         }
     }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        
+        // 停止WebServer以释放资源
+        try {
+            if (WebServerManager.isRunning()) {
+                Timber.i("Stopping WebServer in MainActivity.onDestroy()")
+                WebServerManager.stop()
+                Timber.i("WebServer successfully stopped")
+            } else {
+                Timber.d("WebServer was not running during MainActivity.onDestroy()")
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error occurred while stopping WebServer in MainActivity.onDestroy()")
+        }
+    }
+
     private var lastUpdate: Uri? = null
 
     override fun onNavigationItemSelected(item: MenuItem) = when (item.itemId) {

@@ -292,66 +292,119 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         private fun getDeviceIpAddress(): String? {
         return try {
             // 首先尝试获取用户设置的静态IP地址
-            val staticIps = StaticIpSetter.ips
-            if (staticIps.isNotEmpty()) {
-                // 解析静态IP设置，可能包含多个IP（每行一个）
-                val ipLines = staticIps.lines().filter { it.isNotEmpty() }
-                for (ipLine in ipLines) {
-                    val ip = ipLine.trim()
-                    // 检查是否是有效的IPv4地址
-                    if (isValidIPv4(ip)) {
-                        return ip
+            try {
+                val staticIps = StaticIpSetter.ips
+                if (staticIps.isNotEmpty()) {
+                    Timber.d("Checking static IP settings: $staticIps")
+                    // 解析静态IP设置，可能包含多个IP（每行一个）
+                    val ipLines = staticIps.lines().filter { it.isNotEmpty() }
+                    for (ipLine in ipLines) {
+                        val ip = ipLine.trim()
+                        // 检查是否是有效的IPv4地址
+                        if (isValidIPv4(ip)) {
+                            Timber.d("Using static IP address: $ip")
+                            return ip
+                        } else {
+                            Timber.w("Invalid static IP address format: $ip")
+                        }
                     }
+                    Timber.w("No valid static IP addresses found in settings")
                 }
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to read static IP settings, falling back to network interfaces")
             }
             
             // 如果没有设置静态IP或静态IP无效，则获取网络接口的IP
-            val networkInterfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            while (networkInterfaces.hasMoreElements()) {
-                val networkInterface = networkInterfaces.nextElement()
-                
-                // 跳过回环接口和未启用的接口
-                if (networkInterface.isLoopback || !networkInterface.isUp) {
-                    continue
+            try {
+                val networkInterfaces = java.net.NetworkInterface.getNetworkInterfaces()
+                if (networkInterfaces == null) {
+                    Timber.w("Network interfaces enumeration returned null")
+                    return null
                 }
                 
-                // 获取接口的IP地址
-                val inetAddresses = networkInterface.inetAddresses
-                while (inetAddresses.hasMoreElements()) {
-                    val inetAddress = inetAddresses.nextElement()
+                val foundIPs = mutableListOf<String>()
+                while (networkInterfaces.hasMoreElements()) {
+                    val networkInterface = networkInterfaces.nextElement()
                     
-                    // 只选择IPv4地址，排除回环地址
-                    if (inetAddress is java.net.Inet4Address && !inetAddress.isLoopbackAddress) {
-                        val ip = inetAddress.hostAddress
+                    // 跳过回环接口和未启用的接口
+                    if (networkInterface.isLoopback || !networkInterface.isUp) {
+                        continue
+                    }
+                    
+                    Timber.d("Checking network interface: ${networkInterface.name}")
+                    
+                    // 获取接口的IP地址
+                    val inetAddresses = networkInterface.inetAddresses
+                    while (inetAddresses.hasMoreElements()) {
+                        val inetAddress = inetAddresses.nextElement()
                         
-                        // 返回任何有效的IPv4地址（不限于私有IP）
-                        if (ip != null) {
-                            return ip
+                        // 只选择IPv4地址，排除回环地址
+                        if (inetAddress is java.net.Inet4Address && !inetAddress.isLoopbackAddress) {
+                            val ip = inetAddress.hostAddress
+                            
+                            // 返回任何有效的IPv4地址（不限于私有IP）
+                            if (ip != null && isValidIPv4(ip)) {
+                                foundIPs.add(ip)
+                                Timber.d("Found valid IP address: $ip on interface ${networkInterface.name}")
+                                return ip
+                            }
                         }
                     }
                 }
+                
+                if (foundIPs.isEmpty()) {
+                    Timber.w("No valid IPv4 addresses found on any network interface")
+                } else {
+                    Timber.d("Found IP addresses: $foundIPs")
+                }
+            } catch (e: SecurityException) {
+                Timber.w(e, "Security exception when accessing network interfaces")
+            } catch (e: Exception) {
+                Timber.w(e, "Exception when enumerating network interfaces")
             }
-            
-
             
             null
         } catch (e: Exception) {
-            Timber.e(e, "Failed to get device IP address")
+            Timber.e(e, "Unexpected exception when getting device IP address")
             null
         }
     }
     
     private fun isValidIPv4(ip: String): Boolean {
         return try {
-            val parts = ip.split(".")
-            if (parts.size != 4) return false
-            
-            for (part in parts) {
-                val num = part.toInt()
-                if (num < 0 || num > 255) return false
+            if (ip.isBlank()) {
+                Timber.d("IP validation failed: empty or blank string")
+                return false
             }
+            
+            val parts = ip.split(".")
+            if (parts.size != 4) {
+                Timber.d("IP validation failed: incorrect number of parts (${parts.size}) in $ip")
+                return false
+            }
+            
+            for ((index, part) in parts.withIndex()) {
+                if (part.isEmpty()) {
+                    Timber.d("IP validation failed: empty part at index $index in $ip")
+                    return false
+                }
+                
+                try {
+                    val num = part.toInt()
+                    if (num < 0 || num > 255) {
+                        Timber.d("IP validation failed: part $part (value: $num) out of range [0-255] in $ip")
+                        return false
+                    }
+                } catch (e: NumberFormatException) {
+                    Timber.d("IP validation failed: non-numeric part '$part' at index $index in $ip")
+                    return false
+                }
+            }
+            
+            Timber.d("IP validation successful: $ip")
             true
         } catch (e: Exception) {
+            Timber.w(e, "Unexpected exception during IP validation for: $ip")
             false
         }
     }
@@ -376,39 +429,138 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
     }
 
     private fun copyWebBackendUrlToClipboard(apiKey: String) {
-        val ip = getDeviceIpAddress()
-        val port = WebServerManager.getPort()
-        
-        if (ip != null) {
-            val webBackendUrl = "http://$ip:$port/$apiKey"
-            val clipboard = requireContext().getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            val clip = android.content.ClipData.newPlainText("Web后台地址", webBackendUrl)
-            clipboard.setPrimaryClip(clip)
-            Toast.makeText(requireContext(), "Web后台地址已复制到剪贴板", Toast.LENGTH_SHORT).show()
-        } else {
-            // 如果无法获取IP地址，回退到复制API Key
-            val clipboard = requireContext().getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        try {
+            val context = requireContext()
+            val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+            
+            if (clipboard == null) {
+                Timber.w("Clipboard service is not available")
+                Toast.makeText(context, "剪贴板服务不可用", Toast.LENGTH_SHORT).show()
+                return
+            }
+            
+            val ip = getDeviceIpAddress()
+            val port = WebServerManager.getPort()
+            
+            if (ip != null) {
+                try {
+                    val webBackendUrl = "http://$ip:$port/$apiKey"
+                    val clip = android.content.ClipData.newPlainText("Web后台地址", webBackendUrl)
+                    clipboard.setPrimaryClip(clip)
+                    
+                    // 验证剪贴板内容是否正确设置
+                    val primaryClip = clipboard.primaryClip
+                    if (primaryClip != null && primaryClip.itemCount > 0) {
+                        val clipText = primaryClip.getItemAt(0).text?.toString()
+                        if (clipText == webBackendUrl) {
+                            Toast.makeText(context, "Web后台地址已复制到剪贴板", Toast.LENGTH_SHORT).show()
+                            Timber.d("Successfully copied web backend URL to clipboard: $webBackendUrl")
+                        } else {
+                            Timber.w("Clipboard content verification failed. Expected: $webBackendUrl, Got: $clipText")
+                            Toast.makeText(context, "剪贴板复制可能不完整，请重试", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        Timber.w("Failed to verify clipboard content after copy operation")
+                        Toast.makeText(context, "剪贴板复制验证失败，请重试", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: SecurityException) {
+                    Timber.w(e, "Security exception when copying web backend URL to clipboard")
+                    // 回退到复制API Key
+                    fallbackCopyApiKey(clipboard, apiKey, context)
+                } catch (e: Exception) {
+                    Timber.w(e, "Exception when copying web backend URL to clipboard")
+                    // 回退到复制API Key
+                    fallbackCopyApiKey(clipboard, apiKey, context)
+                }
+            } else {
+                // 如果无法获取IP地址，回退到复制API Key
+                Timber.w("Unable to get device IP address, falling back to API Key copy")
+                fallbackCopyApiKey(clipboard, apiKey, context)
+            }
+        } catch (e: SecurityException) {
+            Timber.w(e, "Security exception when accessing clipboard service")
+            Toast.makeText(requireContext(), "无法访问剪贴板：权限被拒绝", Toast.LENGTH_SHORT).show()
+        } catch (e: IllegalStateException) {
+            Timber.w(e, "Fragment not attached when accessing clipboard")
+            // Fragment可能已经被销毁，无法显示Toast
+            Timber.w("Cannot show clipboard error message: Fragment not attached")
+        } catch (e: Exception) {
+            Timber.w(e, "Unexpected exception when copying to clipboard")
+            try {
+                Toast.makeText(requireContext(), "剪贴板操作失败：${e.message}", Toast.LENGTH_SHORT).show()
+            } catch (fragmentException: Exception) {
+                Timber.w(fragmentException, "Cannot show error toast: Fragment issue")
+            }
+        }
+    }
+    
+    private fun fallbackCopyApiKey(clipboard: android.content.ClipboardManager, apiKey: String, context: Context) {
+        try {
             val clip = android.content.ClipData.newPlainText("API Key", apiKey)
             clipboard.setPrimaryClip(clip)
-            Toast.makeText(requireContext(), "无法获取IP地址，已复制API Key", Toast.LENGTH_SHORT).show()
+            
+            // 验证API Key是否正确复制
+            val primaryClip = clipboard.primaryClip
+            if (primaryClip != null && primaryClip.itemCount > 0) {
+                val clipText = primaryClip.getItemAt(0).text?.toString()
+                if (clipText == apiKey) {
+                    Toast.makeText(context, "无法获取IP地址，已复制API Key到剪贴板", Toast.LENGTH_SHORT).show()
+                    Timber.d("Successfully copied API Key to clipboard as fallback")
+                } else {
+                    Timber.w("API Key clipboard verification failed. Expected: $apiKey, Got: $clipText")
+                    Toast.makeText(context, "API Key复制可能不完整，请重试", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Timber.w("Failed to verify API Key clipboard content after copy operation")
+                Toast.makeText(context, "API Key复制验证失败，请重试", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: SecurityException) {
+            Timber.w(e, "Security exception when copying API Key to clipboard as fallback")
+            Toast.makeText(context, "无法访问剪贴板：权限被拒绝", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Timber.w(e, "Exception when copying API Key to clipboard as fallback")
+            Toast.makeText(context, "API Key复制失败：${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun openWebBackendInBrowser(apiKey: String) {
-        val ip = getDeviceIpAddress()
-        val port = WebServerManager.getPort()
-        
-        if (ip != null) {
-            val webBackendUrl = "http://$ip:$port/$apiKey"
-            try {
-                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(webBackendUrl))
-                startActivity(intent)
-                Toast.makeText(requireContext(), "正在打开Web后台", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(requireContext(), "无法打开浏览器: ${e.message}", Toast.LENGTH_SHORT).show()
+        try {
+            val ip = getDeviceIpAddress()
+            val port = WebServerManager.getPort()
+            
+            if (ip != null) {
+                val webBackendUrl = "http://$ip:$port/$apiKey"
+                Timber.d("Attempting to open web backend URL in browser: $webBackendUrl")
+                
+                try {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(webBackendUrl))
+                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(intent)
+                    Toast.makeText(requireContext(), "正在打开Web后台", Toast.LENGTH_SHORT).show()
+                } catch (e: android.content.ActivityNotFoundException) {
+                    Timber.w(e, "No browser app found to handle the URL")
+                    Toast.makeText(requireContext(), "未找到可用的浏览器应用", Toast.LENGTH_SHORT).show()
+                } catch (e: SecurityException) {
+                    Timber.w(e, "Security exception when opening browser")
+                    Toast.makeText(requireContext(), "无法打开浏览器：权限被拒绝", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Timber.w(e, "Exception when opening browser")
+                    Toast.makeText(requireContext(), "无法打开浏览器: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Timber.w("Cannot open web backend in browser: device IP address is null")
+                Toast.makeText(requireContext(), "无法获取设备IP地址，无法打开Web后台", Toast.LENGTH_SHORT).show()
             }
-        } else {
-            Toast.makeText(requireContext(), "无法获取设备IP地址", Toast.LENGTH_SHORT).show()
+        } catch (e: IllegalStateException) {
+            Timber.w(e, "Fragment not attached when opening web backend in browser")
+            // Fragment可能已经被销毁，无法显示Toast
+        } catch (e: Exception) {
+            Timber.w(e, "Unexpected exception when opening web backend in browser")
+            try {
+                Toast.makeText(requireContext(), "打开Web后台失败：${e.message}", Toast.LENGTH_SHORT).show()
+            } catch (fragmentException: Exception) {
+                Timber.w(fragmentException, "Cannot show error toast: Fragment issue")
+            }
         }
     }
 

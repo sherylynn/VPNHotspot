@@ -20,6 +20,7 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 /**
@@ -59,11 +60,21 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
         
         fun stop() {
             instance?.let { server ->
-                if (server.isRunning) {
-                    server.stop()
-                    Timber.i("OkHttpWebServer stopped")
+                try {
+                    if (server.isRunning) {
+                        server.stop()
+                        Timber.i("OkHttpWebServer stopped")
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Error stopping OkHttpWebServer instance")
+                } finally {
+                    // 清理实例引用和缓存状态
+                    instance = null
+                    cachedSystemStatus = null
+                    lastStatusUpdateTime = 0
+                    lastCpuTotal = 0L
+                    lastCpuNonIdle = 0L
                 }
-                instance = null
             }
         }
     }
@@ -72,7 +83,7 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
     var isRunning = false
         private set
     private val executor = Executors.newCachedThreadPool()
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
@@ -88,50 +99,246 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
         if (isRunning) return
         
         try {
+            // 如果协程作用域已被取消，重新创建
+            if (!scope.isActive) {
+                scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+                Timber.d("Recreated coroutine scope for WebServer restart")
+            }
+            
             serverSocket = ServerSocket()
             serverSocket?.reuseAddress = true
             serverSocket?.bind(InetSocketAddress(port))
             isRunning = true
             
             scope.launch {
-                while (isRunning) {
-                    try {
-                        val socket = serverSocket?.accept() ?: break
-                        handleConnection(socket)
-                    } catch (e: IOException) {
-                        if (isRunning) {
-                            Timber.e(e, "Error accepting connection")
+                try {
+                    while (isRunning && !Thread.currentThread().isInterrupted) {
+                        try {
+                            val socket = serverSocket?.accept() ?: break
+                            handleConnection(socket)
+                        } catch (e: IOException) {
+                            if (isRunning) {
+                                Timber.e(e, "Error accepting connection")
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    if (isRunning) {
+                        Timber.e(e, "Error in connection acceptance loop")
+                    }
+                } finally {
+                    Timber.d("Connection acceptance loop terminated")
                 }
             }
             
             Timber.i("OkHttpWebServer started successfully on port $port")
         } catch (e: IOException) {
             Timber.e(e, "Failed to start OkHttpWebServer")
+            isRunning = false
             throw e
         }
     }
     
     fun stop() {
+        if (!isRunning) {
+            Timber.d("OkHttpWebServer is already stopped")
+            return
+        }
+        
+        Timber.i("Stopping OkHttpWebServer on port $port")
         isRunning = false
+        
         try {
-            serverSocket?.close()
-            serverSocket = null
-            scope.cancel()
-            executor.shutdown()
-            Timber.i("OkHttpWebServer stopped")
+            // 1. 首先关闭服务器套接字，停止接受新连接
+            serverSocket?.let { socket ->
+                try {
+                    if (!socket.isClosed) {
+                        socket.close()
+                        Timber.d("Server socket closed")
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Error closing server socket")
+                } finally {
+                    serverSocket = null
+                }
+            }
+            
+            // 2. 取消协程作用域并等待完成
+            try {
+                if (scope.isActive) {
+                    scope.cancel("WebServer stopping")
+                    // 等待协程作用域中的所有任务完成
+                    runBlocking {
+                        withTimeoutOrNull(3000) { // 3秒超时
+                            scope.coroutineContext[Job]?.join()
+                        }
+                    }
+                    Timber.d("Coroutine scope cancelled and cleaned up")
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Error cancelling coroutine scope")
+            }
+            
+            // 3. 关闭线程池，等待现有任务完成
+            try {
+                executor.shutdown()
+                
+                // 等待线程池正常关闭，最多等待5秒
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    Timber.w("Executor did not terminate gracefully, forcing shutdown")
+                    val droppedTasks = executor.shutdownNow()
+                    if (droppedTasks.isNotEmpty()) {
+                        Timber.w("Dropped ${droppedTasks.size} pending tasks during forced shutdown")
+                    }
+                    
+                    // 再等待3秒确保强制关闭完成
+                    if (!executor.awaitTermination(3, TimeUnit.SECONDS)) {
+                        Timber.e("Executor did not terminate even after forced shutdown")
+                    } else {
+                        Timber.d("Executor terminated after forced shutdown")
+                    }
+                } else {
+                    Timber.d("Thread pool shutdown completed gracefully")
+                }
+            } catch (e: InterruptedException) {
+                Timber.w("Thread interrupted during executor shutdown")
+                Thread.currentThread().interrupt()
+                try {
+                    executor.shutdownNow()
+                    executor.awaitTermination(1, TimeUnit.SECONDS)
+                } catch (ex: Exception) {
+                    Timber.e(ex, "Error during forced executor shutdown")
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Error shutting down executor")
+                try {
+                    executor.shutdownNow()
+                } catch (ex: Exception) {
+                    Timber.e(ex, "Error during emergency executor shutdown")
+                }
+            }
+            
+            // 4. 关闭HTTP客户端资源
+            try {
+                // 关闭HTTP客户端的调度器
+                client.dispatcher.executorService.shutdown()
+                if (!client.dispatcher.executorService.awaitTermination(2, TimeUnit.SECONDS)) {
+                    client.dispatcher.executorService.shutdownNow()
+                    Timber.w("HTTP client dispatcher forced shutdown")
+                }
+                
+                // 清空连接池
+                client.connectionPool.evictAll()
+                
+                // 关闭缓存（如果有）
+                client.cache?.close()
+                
+                Timber.d("HTTP client resources cleaned up")
+            } catch (e: Exception) {
+                Timber.w(e, "Error cleaning up HTTP client resources")
+            }
+            
+            // 5. 清理缓存状态
+            try {
+                cachedSystemStatus = null
+                lastStatusUpdateTime = 0
+                lastCpuTotal = 0L
+                lastCpuNonIdle = 0L
+                Timber.d("Cached status cleared")
+            } catch (e: Exception) {
+                Timber.w(e, "Error clearing cached status")
+            }
+            
+            Timber.i("OkHttpWebServer stopped successfully")
+            
         } catch (e: Exception) {
-            Timber.e(e, "Error stopping OkHttpWebServer")
+            Timber.e(e, "Error during OkHttpWebServer shutdown")
+            // 即使出现错误，也要确保资源被标记为已清理
+            performEmergencyCleanup()
+        }
+    }
+    
+    private fun performEmergencyCleanup() {
+        try {
+            Timber.w("Performing emergency cleanup")
+            
+            // 强制关闭服务器套接字
+            try {
+                serverSocket?.close()
+            } catch (e: Exception) {
+                Timber.e(e, "Error in emergency server socket cleanup")
+            } finally {
+                serverSocket = null
+            }
+            
+            // 强制取消协程作用域
+            try {
+                scope.cancel("Emergency cleanup")
+            } catch (e: Exception) {
+                Timber.e(e, "Error in emergency scope cleanup")
+            }
+            
+            // 强制关闭线程池
+            try {
+                executor.shutdownNow()
+            } catch (e: Exception) {
+                Timber.e(e, "Error in emergency executor cleanup")
+            }
+            
+            // 强制关闭HTTP客户端
+            try {
+                client.dispatcher.executorService.shutdownNow()
+                client.connectionPool.evictAll()
+                client.cache?.close()
+            } catch (e: Exception) {
+                Timber.e(e, "Error in emergency HTTP client cleanup")
+            }
+            
+            // 清理缓存
+            try {
+                cachedSystemStatus = null
+                lastStatusUpdateTime = 0
+                lastCpuTotal = 0L
+                lastCpuNonIdle = 0L
+            } catch (e: Exception) {
+                Timber.e(e, "Error in emergency cache cleanup")
+            }
+            
+            Timber.w("Emergency cleanup completed")
+            
+        } catch (e: Exception) {
+            Timber.e(e, "Critical error during emergency cleanup")
         }
     }
     
     private fun handleConnection(socket: java.net.Socket) {
         executor.execute {
+            var inputStream: java.io.InputStream? = null
+            var outputStream: java.io.OutputStream? = null
+            var bufferedReader: java.io.BufferedReader? = null
+            var bufferedWriter: java.io.BufferedWriter? = null
+            
             try {
+                // 设置套接字超时以避免长时间阻塞
+                socket.soTimeout = 30000 // 30秒超时
+                
+                inputStream = socket.getInputStream()
+                outputStream = socket.getOutputStream()
+                
                 val request = parseRequest(socket)
                 val response = processRequest(request)
                 sendResponse(socket, response)
+                
+            } catch (e: java.net.SocketTimeoutException) {
+                Timber.w("Socket timeout while handling connection")
+                try {
+                    sendErrorResponse(socket, 408, "Request Timeout")
+                } catch (ex: Exception) {
+                    Timber.e(ex, "Error sending timeout response")
+                }
+            } catch (e: java.net.SocketException) {
+                // 客户端断开连接，这是正常情况，不需要记录错误
+                Timber.d("Client disconnected: ${e.message}")
             } catch (e: Exception) {
                 Timber.e(e, "Error handling connection")
                 try {
@@ -140,10 +347,39 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
                     Timber.e(ex, "Error sending error response")
                 }
             } finally {
+                // 确保所有资源都被正确关闭 - 按照依赖关系逆序关闭
                 try {
-                    socket.close()
+                    bufferedWriter?.close()
                 } catch (e: Exception) {
-                    Timber.e(e, "Error closing socket")
+                    Timber.w(e, "Error closing buffered writer")
+                }
+                
+                try {
+                    bufferedReader?.close()
+                } catch (e: Exception) {
+                    Timber.w(e, "Error closing buffered reader")
+                }
+                
+                try {
+                    outputStream?.close()
+                } catch (e: Exception) {
+                    Timber.w(e, "Error closing output stream")
+                }
+                
+                try {
+                    inputStream?.close()
+                } catch (e: Exception) {
+                    Timber.w(e, "Error closing input stream")
+                }
+                
+                try {
+                    if (!socket.isClosed) {
+                        socket.shutdownOutput()
+                        socket.shutdownInput()
+                        socket.close()
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Error closing socket")
                 }
             }
         }
@@ -151,35 +387,84 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
     
     private fun parseRequest(socket: java.net.Socket): HttpRequest {
         val input = socket.getInputStream().bufferedReader()
-        val firstLine = input.readLine() ?: throw IOException("Empty request")
-        val parts = firstLine.split(" ")
-        if (parts.size != 3) throw IOException("Invalid request line: $firstLine")
         
-        val method = parts[0]
-        val uri = parts[1]
-        
-        // 读取 headers
-        val headers = mutableMapOf<String, String>()
-        var line: String?
-        while (input.readLine().also { line = it } != null && line!!.isNotEmpty()) {
-            val colonIndex = line!!.indexOf(':')
-            if (colonIndex > 0) {
-                val key = line!!.substring(0, colonIndex).trim().lowercase()
-                val value = line!!.substring(colonIndex + 1).trim()
-                headers[key] = value
+        try {
+            // 设置较短的读取超时，避免长时间阻塞
+            socket.soTimeout = 5000 // 5秒超时
+            
+            val firstLine = input.readLine()
+            if (firstLine == null || firstLine.trim().isEmpty()) {
+                throw IOException("Empty request")
             }
+            
+            Timber.d("HTTP request first line: $firstLine")
+            
+            val parts = firstLine.trim().split(" ")
+            if (parts.size != 3) {
+                throw IOException("Invalid request line: $firstLine")
+            }
+            
+            val method = parts[0].uppercase()
+            val uri = parts[1]
+            val httpVersion = parts[2]
+            
+            // 验证HTTP方法
+            if (method !in listOf("GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS")) {
+                throw IOException("Unsupported HTTP method: $method")
+            }
+            
+            // 读取 headers
+            val headers = mutableMapOf<String, String>()
+            var line: String?
+            var headerCount = 0
+            
+            while (input.readLine().also { line = it } != null) {
+                if (line!!.isEmpty()) break // 空行表示headers结束
+                
+                headerCount++
+                if (headerCount > 100) { // 防止过多headers
+                    throw IOException("Too many headers")
+                }
+                
+                val colonIndex = line!!.indexOf(':')
+                if (colonIndex > 0) {
+                    val key = line!!.substring(0, colonIndex).trim().lowercase()
+                    val value = line!!.substring(colonIndex + 1).trim()
+                    headers[key] = value
+                    Timber.v("HTTP header: $key = $value")
+                }
+            }
+            
+            // 读取请求体（如果有）
+            var body: String? = null
+            val contentLength = headers["content-length"]?.toIntOrNull()
+            if (contentLength != null && contentLength > 0) {
+                if (contentLength > 1024 * 1024) { // 限制最大1MB
+                    throw IOException("Request body too large: $contentLength bytes")
+                }
+                
+                val bodyChars = CharArray(contentLength)
+                var totalRead = 0
+                while (totalRead < contentLength) {
+                    val bytesRead = input.read(bodyChars, totalRead, contentLength - totalRead)
+                    if (bytesRead == -1) break
+                    totalRead += bytesRead
+                }
+                
+                if (totalRead > 0) {
+                    body = String(bodyChars, 0, totalRead)
+                    Timber.v("HTTP body: $body")
+                }
+            }
+            
+            Timber.d("Parsed HTTP request: $method $uri (${headers.size} headers)")
+            return HttpRequest(method, uri, headers, body)
+            
+        } catch (e: java.net.SocketTimeoutException) {
+            throw IOException("Request timeout while reading", e)
+        } catch (e: java.net.SocketException) {
+            throw IOException("Socket error while reading request", e)
         }
-        
-        // 读取请求体（如果有）
-        var body: String? = null
-        val contentLength = headers["content-length"]?.toIntOrNull()
-        if (contentLength != null && contentLength > 0) {
-            val bodyChars = CharArray(contentLength)
-            input.read(bodyChars, 0, contentLength)
-            body = String(bodyChars)
-        }
-        
-        return HttpRequest(method, uri, headers, body)
     }
     
     private fun processRequest(request: HttpRequest): HttpResponse {
@@ -191,6 +476,19 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
         // favicon.ico 不需要认证
         if (uri == "/favicon.ico") {
             return serveFavicon()
+        }
+        
+        // 检查是否启用了API Key认证
+        val apiKeyAuthEnabled = ApiKeyManager.isApiKeyAuthEnabled()
+        Timber.d("API Key authentication enabled: $apiKeyAuthEnabled")
+        
+        // 如果没有启用API Key认证，直接处理请求
+        if (!apiKeyAuthEnabled) {
+            return when {
+                uri == "/" || uri.isEmpty() -> serveMainPage()
+                uri.startsWith("/api/") -> handleApiRequest(uri, method, request)
+                else -> serve404()
+            }
         }
         
         // API路由 - 优先处理API请求
@@ -217,9 +515,8 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
             }
         }
         
-        // 如果没有API Key，返回401
-        return HttpResponse(401, jsonMediaType, 
-            """{"error": "Unauthorized", "message": "API Key required"}""")
+        // 如果启用了API Key认证但没有提供API Key，返回引导页面
+        return serveApiKeyRequiredPage()
     }
     
     // 统一API Key提取方法
@@ -686,6 +983,141 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
         return HttpResponse(404, textMediaType, "404 Not Found")
     }
     
+    private fun serveApiKeyRequiredPage(): HttpResponse {
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>需要API Key - VPNHotspot</title>
+                <style>
+                    body { 
+                        font-family: Arial, sans-serif; 
+                        margin: 0; 
+                        padding: 20px; 
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        min-height: 100vh;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .container { 
+                        max-width: 500px; 
+                        background: white; 
+                        padding: 40px; 
+                        border-radius: 12px; 
+                        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                        text-align: center;
+                    }
+                    .icon { 
+                        font-size: 64px; 
+                        color: #667eea; 
+                        margin-bottom: 20px; 
+                    }
+                    h1 { 
+                        color: #333; 
+                        margin-bottom: 20px; 
+                        font-size: 28px;
+                    }
+                    p { 
+                        color: #666; 
+                        line-height: 1.6; 
+                        margin-bottom: 30px; 
+                    }
+                    .steps {
+                        text-align: left;
+                        background: #f8f9fa;
+                        padding: 20px;
+                        border-radius: 8px;
+                        margin: 20px 0;
+                    }
+                    .step {
+                        margin: 10px 0;
+                        padding: 10px 0;
+                        border-bottom: 1px solid #eee;
+                    }
+                    .step:last-child {
+                        border-bottom: none;
+                    }
+                    .step-number {
+                        display: inline-block;
+                        width: 24px;
+                        height: 24px;
+                        background: #667eea;
+                        color: white;
+                        border-radius: 50%;
+                        text-align: center;
+                        line-height: 24px;
+                        font-size: 14px;
+                        margin-right: 10px;
+                    }
+                    .url-example {
+                        background: #e9ecef;
+                        padding: 10px;
+                        border-radius: 4px;
+                        font-family: monospace;
+                        word-break: break-all;
+                        margin: 10px 0;
+                    }
+                    .refresh-btn {
+                        background: #667eea;
+                        color: white;
+                        padding: 12px 24px;
+                        border: none;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 16px;
+                        margin-top: 20px;
+                    }
+                    .refresh-btn:hover {
+                        background: #5a6fd8;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="icon">🔐</div>
+                    <h1>需要API Key访问</h1>
+                    <p>此WebServer已启用API Key认证。请按照以下步骤获取访问权限：</p>
+                    
+                    <div class="steps">
+                        <div class="step">
+                            <span class="step-number">1</span>
+                            打开VPNHotspot应用
+                        </div>
+                        <div class="step">
+                            <span class="step-number">2</span>
+                            进入设置页面
+                        </div>
+                        <div class="step">
+                            <span class="step-number">3</span>
+                            找到"API Key管理"选项
+                        </div>
+                        <div class="step">
+                            <span class="step-number">4</span>
+                            选择"复制后台地址"或"显示二维码"
+                        </div>
+                        <div class="step">
+                            <span class="step-number">5</span>
+                            使用包含API Key的完整URL访问
+                        </div>
+                    </div>
+                    
+                    <p><strong>URL格式示例：</strong></p>
+                    <div class="url-example">
+                        http://设备IP:端口/your_api_key
+                    </div>
+                    
+                    <button class="refresh-btn" onclick="window.location.reload()">刷新页面</button>
+                </div>
+            </body>
+            </html>
+        """.trimIndent()
+        
+        return HttpResponse(200, htmlMediaType, html)
+    }
+    
     private fun serveDebugStatus(): HttpResponse {
         return try {
             val battery = getBatteryLevel()
@@ -931,18 +1363,19 @@ class OkHttpWebServer(private val context: Context, val port: Int = 9999) {
     }
     
     private fun sendResponse(socket: java.net.Socket, response: HttpResponse) {
-        val output = socket.getOutputStream().bufferedWriter()
-        val bodyBytes = response.body.toByteArray(response.contentType.charset() ?: Charsets.UTF_8)
-        output.write("HTTP/1.1 ${response.statusCode} ${getStatusText(response.statusCode)}\r\n")
-        output.write("Content-Type: ${response.contentType}\r\n")
-        output.write("Content-Length: ${bodyBytes.size}\r\n")
-        output.write("Access-Control-Allow-Origin: *\r\n")
-        output.write("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
-        output.write("Access-Control-Allow-Headers: Content-Type, Accept, Authorization, X-API-Key\r\n")
-        output.write("Connection: close\r\n")
-        output.write("\r\n")
-        output.write(response.body)
-        output.flush()
+        socket.getOutputStream().bufferedWriter().use { output ->
+            val bodyBytes = response.body.toByteArray(response.contentType.charset() ?: Charsets.UTF_8)
+            output.write("HTTP/1.1 ${response.statusCode} ${getStatusText(response.statusCode)}\r\n")
+            output.write("Content-Type: ${response.contentType}\r\n")
+            output.write("Content-Length: ${bodyBytes.size}\r\n")
+            output.write("Access-Control-Allow-Origin: *\r\n")
+            output.write("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
+            output.write("Access-Control-Allow-Headers: Content-Type, Accept, Authorization, X-API-Key\r\n")
+            output.write("Connection: close\r\n")
+            output.write("\r\n")
+            output.write(response.body)
+            output.flush()
+        }
     }
     
     private fun sendErrorResponse(socket: java.net.Socket, statusCode: Int, message: String) {
