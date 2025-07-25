@@ -50,7 +50,7 @@ echo "✅ Java版本: $(java -version 2>&1 | head -n 1)"
 # 执行构建
 echo ""
 echo "🚀 开始构建VPNHotspot..."
-./gradlew clean build
+./gradlew assembleFreedomDebug
 
 echo ""
 echo "✅ 构建完成！"

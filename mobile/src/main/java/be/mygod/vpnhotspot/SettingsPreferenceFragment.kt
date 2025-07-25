@@ -155,8 +155,16 @@ class SettingsPreferenceFragment : PreferenceFragmentCompat() {
         
         // 远程控制自动连接开关
         findPreference<TwoStatePreference>("remote.control.auto.connect")!!.setOnPreferenceChangeListener { _, newValue ->
-            // 更新设置偏好
-            true  // 使用默认的SharedPreferences存储
+            val newAutoConnect = newValue as Boolean
+            
+            // 显示提示信息
+            val message = if (newAutoConnect) "已启用远程控制自动连接" else "已禁用远程控制自动连接"
+            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show()
+            
+            // 记录设置变化
+            Timber.d("Settings: 远程控制自动连接已设置为 $newAutoConnect")
+            
+            true
         }
         
         // Web服务器设置

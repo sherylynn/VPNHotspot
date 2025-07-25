@@ -110,7 +110,7 @@
             app:icon="@drawable/ic_action_settings_backup_restore"
             app:title="远程控制自动连接"
             app:summary="进入远程控制页面时自动尝试连接上次保存的远程设备"
-            app:defaultValue="true"/>
+            app:defaultValue="false"/>
         <SwitchPreferenceCompat
             app:key="service.repeater.safeMode"
             app:icon="@drawable/ic_alert_warning"

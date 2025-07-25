@@ -34,7 +34,6 @@ class RemoteControlFragment : Fragment() {
         private const val KEY_LAST_IP = "last_ip"
         private const val KEY_LAST_PORT = "last_port"
         private const val KEY_LAST_API_KEY = "last_api_key"
-        private const val KEY_AUTO_CONNECT = "auto_connect"
         private const val KEY_MANUAL_MODIFIED = "manual_modified"
     }
 
@@ -65,50 +64,55 @@ class RemoteControlFragment : Fragment() {
     }
     
     private fun loadLastConnectionInfo() {
-        // 检查是否已经手动修改过
-        val manualModified = prefs.getBoolean(KEY_MANUAL_MODIFIED, false)
+        // 从设置页面读取统一的自动连接开关
+        val settingsPrefs = App.app.pref
+        val autoConnectEnabled = settingsPrefs.getBoolean("remote.control.auto.connect", false)
         
-        // 从设置页面读取全局自动连接开关
-        val settingsPrefs = requireContext().getSharedPreferences("settings_prefs", Context.MODE_PRIVATE)
-        val globalAutoConnect = settingsPrefs.getBoolean("remote.control.auto.connect", true)
+        // 调试日志
+        Timber.d("RemoteControl: autoConnectEnabled = $autoConnectEnabled")
         
-        if (manualModified) {
-            // 如果已经手动修改过，加载保存的连接信息
-            val lastIp = prefs.getString(KEY_LAST_IP, null)
-            val lastPort = prefs.getInt(KEY_LAST_PORT, 9999)
-            val lastApiKey = prefs.getString(KEY_LAST_API_KEY, null)
-            val localAutoConnect = prefs.getBoolean(KEY_AUTO_CONNECT, true)
+        // 加载保存的连接信息
+        val lastIp = prefs.getString(KEY_LAST_IP, null)
+        val lastPort = prefs.getInt(KEY_LAST_PORT, 9999)
+        val lastApiKey = prefs.getString(KEY_LAST_API_KEY, null)
+        
+        Timber.d("RemoteControl: lastIp = $lastIp, lastApiKey = ${if (lastApiKey != null) "***" else "null"}")
+        
+        if (lastIp != null && lastApiKey != null) {
+            binding.ipInput.setText(lastIp)
+            binding.portInput.setText(lastPort.toString())
+            binding.passwordInput.setText(lastApiKey)
             
-            if (lastIp != null && lastApiKey != null) {
-                binding.ipInput.setText(lastIp)
-                binding.portInput.setText(lastPort.toString())
-                binding.passwordInput.setText(lastApiKey)
-                
-                // 使用全局设置和本地设置的逻辑与
-                val shouldAutoConnect = globalAutoConnect && localAutoConnect
-                if (shouldAutoConnect) {
-                    connectToRemoteDevice()
-                }
+            // 根据设置决定是否自动连接
+            if (autoConnectEnabled) {
+                Timber.d("RemoteControl: 自动连接已启用，正在连接...")
+                connectToRemoteDevice()
             } else {
-                // 如果没有保存的信息，使用默认地址
-                loadDefaultLocalAddress()
+                Timber.d("RemoteControl: 自动连接已禁用，跳过连接")
             }
         } else {
-            // 如果没有手动修改过，使用默认的本地地址
+            // 如果没有保存的信息，使用默认地址
             loadDefaultLocalAddress()
             
-            // 如果全局设置允许自动连接且使用默认本地地址，也尝试连接
-            if (globalAutoConnect) {
+            // 对于默认本地地址，也根据设置决定是否自动连接
+            if (autoConnectEnabled) {
                 val localIp = getDeviceIpAddress()
                 val localPort = WebServerManager.getPort()
                 val localApiKey = ApiKeyManager.getApiKey()
                 
+                Timber.d("RemoteControl: 默认地址自动连接检查 - localIp = $localIp, hasApiKey = ${!localApiKey.isNullOrEmpty()}")
+                
                 if (localIp != null && !localApiKey.isNullOrEmpty()) {
                     // 延迟一下，让UI先显示出来
                     view?.postDelayed({
+                        Timber.d("RemoteControl: 默认地址自动连接已启用，正在连接...")
                         connectToRemoteDevice()
                     }, 500)
+                } else {
+                    Timber.d("RemoteControl: 默认地址信息不完整，跳过连接")
                 }
+            } else {
+                Timber.d("RemoteControl: 默认地址自动连接已禁用，跳过连接")
             }
         }
     }
@@ -202,8 +206,6 @@ class RemoteControlFragment : Fragment() {
             .putString(KEY_LAST_IP, ip)
             .putInt(KEY_LAST_PORT, port)
             .putString(KEY_LAST_API_KEY, apiKey)
-            .putBoolean(KEY_AUTO_CONNECT, true)
-            .putBoolean(KEY_MANUAL_MODIFIED, true) // 标记为手动修改
             .apply()
     }
     
@@ -212,7 +214,7 @@ class RemoteControlFragment : Fragment() {
             .putBoolean(KEY_MANUAL_MODIFIED, true)
             .apply()
     }
-
+    
     private fun setupListeners() {
         binding.connectButton.setOnClickListener {
             connectToRemoteDevice()
@@ -635,6 +637,13 @@ class RemoteControlFragment : Fragment() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 每次回到这个页面时重新加载信息
+        Timber.d("RemoteControl: onResume - 重新检查自动连接设置")
+        loadLastConnectionInfo()
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
         _binding = null
@@ -646,4 +655,4 @@ class RemoteControlFragment : Fragment() {
         val error: String?,
         val message: String?
     )
-} 
+}
